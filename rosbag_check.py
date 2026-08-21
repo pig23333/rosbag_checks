@@ -27,6 +27,27 @@ RATE_TARGETS: Dict[str, Tuple[float, float]] = {
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".pnm", ".tiff"}
 
 
+def rename_db3_files(bag_path: Path) -> None:
+    """Renames any *.db3 file in output bag directory to *_0.db3 and updates metadata.yaml."""
+    yaml_file = bag_path / "metadata.yaml"
+    yaml_content = yaml_file.read_text(encoding="utf-8") if yaml_file.exists() else None
+
+    for db3_file in list(bag_path.glob("*.db3")):
+        if not db3_file.stem.endswith("_0"):
+            old_name = db3_file.name
+            new_name = f"{db3_file.stem}_0{db3_file.suffix}"
+            new_file = db3_file.with_name(new_name)
+
+            db3_file.rename(new_file)
+            print(f"[OK] Renamed db3 file: {old_name} -> {new_name}")
+
+            if yaml_content is not None:
+                yaml_content = yaml_content.replace(old_name, new_name)
+
+    if yaml_content is not None and yaml_file.exists():
+        yaml_file.write_text(yaml_content, encoding="utf-8")
+
+
 def fix_metadata_yaml(bag_path: Path) -> None:
     """Sanitizes metadata.yaml so ROS 2 C++ parser (yaml-cpp) can read the file correctly."""
     yaml_file = bag_path / "metadata.yaml"
@@ -313,8 +334,22 @@ def main():
         print(f"Error during bag conversion: {e}", file=sys.stderr)
         sys.exit(e.returncode)
 
+    # Rename *.db3 to *_0.db3 and update metadata.yaml accordingly
+    rename_db3_files(output_path)
+
     # Sanitize metadata.yaml for ROS 2 yaml-cpp parser compatibility
     fix_metadata_yaml(output_path)
+
+    # Run 'ros2 bag info /path/to/output_dir -s sqlite3'
+    print(f"\nRunning ROS 2 bag info command for: {output_path}")
+    try:
+        ros2_cmd = ["ros2", "bag", "reindex", str(output_path), "-s", "sqlite3"]
+        subprocess.run(ros2_cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error running 'ros2 bag info': {e}", file=sys.stderr)
+        sys.exit(e.returncode)
+    except FileNotFoundError:
+        print("[WARN] 'ros2' executable not found in system PATH. Skipping 'ros2 bag info'.", file=sys.stderr)
 
     # 4. Verify output ROS 2 bag integrity, duration, and frequencies
     success = check_rosbag_integrity(output_path, input_dir, REQUIRED_TOPICS)
