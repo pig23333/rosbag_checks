@@ -27,6 +27,42 @@ RATE_TARGETS: Dict[str, Tuple[float, float]] = {
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".pnm", ".tiff"}
 
 
+def fix_metadata_yaml(bag_path: Path) -> None:
+    """Sanitizes metadata.yaml so ROS 2 C++ parser (yaml-cpp) can read the file correctly."""
+    yaml_file = bag_path / "metadata.yaml"
+    if not yaml_file.exists():
+        return
+
+    try:
+        with open(yaml_file, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        # Recursively walk the metadata dict and cast numeric strings into proper ints/floats
+        def clean_types(obj):
+            if isinstance(obj, dict):
+                return {k: clean_types(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [clean_types(item) for item in obj]
+            elif isinstance(obj, str):
+                if obj.isdigit():
+                    return int(obj)
+                try:
+                    return float(obj)
+                except ValueError:
+                    return obj
+            return obj
+
+        cleaned_data = clean_types(data)
+
+        # Re-save YAML using clean flow formatting to fix type issues
+        with open(yaml_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump(cleaned_data, f, default_flow_style=False, sort_keys=False)
+
+        print("[OK] Successfully sanitized metadata.yaml for yaml-cpp compatibility.")
+    except Exception as e:
+        print(f"[WARN] Failed to automatically fix metadata.yaml: {e}", file=sys.stderr)
+
+
 def check_rosbag_integrity(bag_dir_path: Path, input_dir: Path, required_topics: List[str]) -> bool:
     """Verifies ROS 2 bag integrity, outputting duration (ns), topic frequencies (Hz), and camera picture frequencies (Hz)."""
     print(f"\nChecking ROS 2 Bag Directory: {bag_dir_path}")
@@ -77,7 +113,7 @@ def check_rosbag_integrity(bag_dir_path: Path, input_dir: Path, required_topics:
     if not files_list:
         relative_paths = info.get("relative_file_paths", [])
         if relative_paths:
-            files_list = [{"path": p} for p in relative_paths]
+            files_list = relative_paths
 
     if not files_list:
         print("[FAIL] No bag data files declared in metadata YAML.")
@@ -85,7 +121,7 @@ def check_rosbag_integrity(bag_dir_path: Path, input_dir: Path, required_topics:
 
     bag_files_ok = True
     for file_entry in files_list:
-        rel_path = file_entry.get("path", "")
+        rel_path = file_entry.get("path", "") if isinstance(file_entry, dict) else file_entry
         full_bag_path = bag_dir_path / rel_path
 
         if not full_bag_path.exists():
@@ -234,7 +270,7 @@ def main():
         print(f"Error: No '.bag' file found inside data directory: '{data_dir}'", file=sys.stderr)
         sys.exit(1)
 
-    input_bag_file = bag_files[0]
+    input_bag_file = bag_files
 
     camera_dir = input_dir / "camera"
     if not camera_dir.exists() or not (camera_dir / "left").is_dir() or not (camera_dir / "right").is_dir():
@@ -267,7 +303,7 @@ def main():
         cmd = [
             "rosbags-convert",
             "--src",
-            str(input_bag_file),
+            *input_bag_file,
             "--dst",
             str(output_path),
         ]
@@ -276,6 +312,9 @@ def main():
     except subprocess.CalledProcessError as e:
         print(f"Error during bag conversion: {e}", file=sys.stderr)
         sys.exit(e.returncode)
+
+    # Sanitize metadata.yaml for ROS 2 yaml-cpp parser compatibility
+    fix_metadata_yaml(output_path)
 
     # 4. Verify output ROS 2 bag integrity, duration, and frequencies
     success = check_rosbag_integrity(output_path, input_dir, REQUIRED_TOPICS)
